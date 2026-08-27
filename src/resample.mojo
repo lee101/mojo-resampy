@@ -1,6 +1,5 @@
 """Table-driven band-limited interpolation kernels for mojo-resampy."""
 
-from std.algorithm import parallelize
 from std.sys.info import simd_width_of as simdwidthof
 
 
@@ -279,7 +278,8 @@ def resample_f64(
             t_end,
         )
 
-    parallelize(worker, chunks, chunks)
+    for chunk in range(chunks):
+        worker(chunk)
 
 
 def resample_f32(
