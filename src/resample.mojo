@@ -64,12 +64,11 @@ def resample_f64_range(
             var right_count = min(
                 n_input - n - 1, (n_window - right_offset) // index_step
             )
-            var left_base = left_offset * phase_taps
-            var right_base = (
-                1
-                if right_offset == table_size
-                else right_offset * phase_taps
-            )
+            var packed_taps = abs(phase_taps)
+            var left_base = left_offset * packed_taps
+            var right_base = right_offset * packed_taps
+            if phase_taps > 0 and right_offset == table_size:
+                right_base = 1
 
             for component in range(components):
                 var acc = Float64(0)
@@ -428,6 +427,47 @@ def mrs_resample_f64(
         phase_taps,
         components,
         use_parallel,
+    )
+
+
+@export("mrs_resample_f64_range")
+def mrs_resample_f64_range(
+    x_addr: Int,
+    times_addr: Int,
+    window_addr: Int,
+    delta_addr: Int,
+    dst_addr: Int,
+    n_series: Int,
+    n_input: Int,
+    n_output: Int,
+    n_window: Int,
+    table_size: Int,
+    scale: Float64,
+    time_scale: Float64,
+    window_scale: Float64,
+    phase_taps: Int,
+    components: Int,
+    t_start: Int,
+    t_end: Int,
+) abi("C"):
+    resample_f64_range(
+        F64Ptr(unsafe_from_address=x_addr),
+        F64Ptr(unsafe_from_address=times_addr),
+        F64Ptr(unsafe_from_address=window_addr),
+        F64Ptr(unsafe_from_address=delta_addr),
+        F64Ptr(unsafe_from_address=dst_addr),
+        n_series,
+        n_input,
+        n_output,
+        n_window,
+        table_size,
+        scale,
+        time_scale,
+        window_scale,
+        phase_taps,
+        components,
+        t_start,
+        t_end,
     )
 
 

@@ -39,6 +39,11 @@ currently stay serial. The package does not expose resampy's private Numba
 generalized ufuncs. Boolean and float16 input, streaming/stateful resampling,
 GPU execution, and a native Mojo filter-design API are not covered.
 
+GPU execution is intentionally excluded: the resampling loop performs about
+four floating-point operations while loading roughly 24 bytes per tap, around
+0.17 flop/byte. This is well below the approximately 2 flop/byte level needed
+to justify device transfers and kernel-launch overhead.
+
 The tests compare every covered behavior directly against the real `resampy`
 package, including both rate directions, all supported dtypes, complex data,
 multiple axes, non-uniform times, filter coefficients, validation failures,
@@ -69,14 +74,14 @@ both libraries; parallel rows use `parallel=True` for both.
 
 | case | mojo-resampy | resampy | ratio |
 | --- | ---: | ---: | ---: |
-| resample 10 s mono 48k->44.1k, best, serial | 223.47 ms | 303.43 ms | 1.36x faster |
-| resample 10 s mono 44.1k->48k, fast, serial | 33.79 ms | 82.75 ms | 2.45x faster |
-| resample 5 s stereo 48k->16k, fast, serial | 42.89 ms | 65.27 ms | 1.52x faster |
-| resample_nu 240k->180k, fast, serial | 12.66 ms | 29.41 ms | 2.32x faster |
-| resample 10 s mono 48k->44.1k, best, parallel | 41.68 ms | 36.62 ms | 0.88x slower |
-| resample 10 s mono 44.1k->48k, fast, parallel | 14.77 ms | 11.45 ms | 0.78x slower |
-| resample 5 s stereo 48k->16k, fast, parallel | 9.50 ms | 16.86 ms | 1.77x faster |
-| resample_nu 240k->180k, fast, parallel | 7.92 ms | 5.33 ms | 0.67x slower |
+| resample 10 s mono 48k->44.1k, best, serial | 62.53 ms | 281.60 ms | 4.50x faster |
+| resample 10 s mono 44.1k->48k, fast, serial | 33.61 ms | 75.01 ms | 2.23x faster |
+| resample 5 s stereo 48k->16k, fast, serial | 17.24 ms | 61.35 ms | 3.56x faster |
+| resample_nu 240k->180k, fast, serial | 11.95 ms | 26.91 ms | 2.25x faster |
+| resample 10 s mono 48k->44.1k, best, parallel | 10.47 ms | 34.05 ms | 3.25x faster |
+| resample 10 s mono 44.1k->48k, fast, parallel | 7.54 ms | 11.42 ms | 1.52x faster |
+| resample 5 s stereo 48k->16k, fast, parallel | 5.94 ms | 13.33 ms | 2.24x faster |
+| resample_nu 240k->180k, fast, parallel | 3.16 ms | 8.28 ms | 2.62x faster |
 
 These are measurements from one machine, not general performance guarantees.
 Run `pixi run bench` to reproduce the table on your hardware.
@@ -85,10 +90,10 @@ Run `pixi run bench` to reproduce the table on your hardware.
 
 Python performs API validation, filter construction, axis normalization, and
 allocation. It moves the resampled axis to a contiguous trailing dimension and
-makes one ctypes call for the full operation. Real and complex arrays use
-dedicated float32 or float64 Mojo kernels; complex samples cross as interleaved
-real and imaginary components. Integer data crosses through a float64 work
-buffer and accumulates to the upstream-compatible float32 output.
+passes the full operation through ctypes. Real and complex arrays use dedicated
+float32 or float64 Mojo kernels; complex samples cross as interleaved real and
+imaginary components. Integer data crosses through a float64 work buffer and
+accumulates to the upstream-compatible float32 output.
 
 The FFI owns no memory. NumPy owns the input, output, time, and filter arrays,
 and passes their addresses as 64-bit integers. The exported Mojo functions
@@ -101,12 +106,15 @@ between adjacent coefficients, clips each wing at the signal boundary, and
 accumulates the weighted input samples. Downsampling scales both the filter and
 its table stride to suppress frequencies above the new Nyquist limit.
 
-For scale-1 float64 kernels, Python packs each filter phase into contiguous tap
-order. Mojo processes those taps with the native float64 SIMD width, two vector
-accumulators, and an explicit scalar tail. Packing is enabled only when there
-are at least 1,024 output points; short calls and downsampling avoid its
-overhead. Parallel calls above the threshold dispatch independent output
-chunks while capturing only raw buffer addresses across the worker boundary.
+For large float64 kernels, Python packs each filter phase into contiguous tap
+order, including the fixed-stride phases used for downsampling. Mojo processes
+those taps with the native float64 SIMD width, two vector accumulators, and an
+explicit scalar tail. Derived tables for immutable built-in filters are cached;
+custom filters are prepared on every call so mutation semantics are preserved.
+Parallel calls above 32,768 output values use a reusable host worker pool to
+invoke the Mojo range kernel on disjoint output chunks. Smaller calls remain
+serial to avoid task-launch overhead, and all NumPy buffers remain caller-owned
+and zero-copy at the FFI boundary.
 
 ## License
 

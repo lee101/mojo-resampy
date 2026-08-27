@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import concurrent.futures
 import os
 import shutil
 import subprocess
@@ -18,6 +19,9 @@ LIB = os.environ.get("MOJO_RESAMPY_LIB") or os.path.join(
 I = ctypes.c_int64
 F = ctypes.c_double
 _ARGS = [I] * 10 + [F, F, F, I, I, I]
+_RANGE_ARGS = [I] * 10 + [F, F, F] + [I] * 4
+PARALLEL_THRESHOLD = 32768
+PARALLEL_WORKERS = min(16, os.cpu_count() or 1)
 
 
 class BuildError(RuntimeError):
@@ -60,7 +64,22 @@ def lib() -> ctypes.CDLL:
             fn = getattr(_library, name)
             fn.argtypes = _ARGS
             fn.restype = None
+        _library.mrs_resample_f64_range.argtypes = _RANGE_ARGS
+        _library.mrs_resample_f64_range.restype = None
     return _library
+
+
+_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def parallel_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _executor
+    if _executor is None:
+        _executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=PARALLEL_WORKERS,
+            thread_name_prefix="mojo-resampy",
+        )
+    return _executor
 
 
 def addr(array: np.ndarray) -> int:

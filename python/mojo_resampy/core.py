@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import weakref
+
 import numpy as np
 
 from . import _lib
-from .filters import get_filter
+from .filters import FILTER_CACHE, get_filter
 
 __all__ = ["resample", "resample_nu"]
+
+_PREPARED_FILTERS: dict[
+    tuple[int, int],
+    tuple[weakref.ReferenceType[np.ndarray], np.ndarray, np.ndarray, int],
+] = {}
 
 
 def _axis_index(axis: int, ndim: int) -> int:
@@ -24,6 +31,53 @@ def _output_dtype(dtype: np.dtype) -> np.dtype:
     if dtype in (np.float32, np.float64, np.complex64, np.complex128):
         return dtype
     raise TypeError(f"Unsupported input dtype: {dtype}")
+
+
+def _prepare_filter(
+    interp_win: np.ndarray,
+    precision: int,
+    pack_mode: int,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    builtin = any(definition[0] is interp_win for definition in FILTER_CACHE.values())
+    key = (id(interp_win), pack_mode)
+    if builtin:
+        cached = _PREPARED_FILTERS.get(key)
+        if cached is not None and cached[0]() is interp_win:
+            return cached[1], cached[2], cached[3]
+
+    interp_delta = np.empty_like(interp_win)
+    np.subtract(interp_win[1:], interp_win[:-1], out=interp_delta[:-1])
+    interp_delta[-1] = 0.0
+    phase_taps = 0
+    prepared_win = interp_win
+    prepared_delta = interp_delta
+    if pack_mode < 0:
+        phase_taps = (interp_win.size - 1) // precision
+        packed = np.empty((2, precision, phase_taps), dtype=np.float64)
+        packed[0] = interp_win[:-1].reshape(phase_taps, precision).T
+        packed[1] = interp_delta[:-1].reshape(phase_taps, precision).T
+        prepared_win = packed[0]
+        prepared_delta = packed[1]
+    elif pack_mode > 0:
+        phase_taps = interp_win.size // pack_mode
+        phases = pack_mode + 1
+        tap_offsets = np.arange(phase_taps) * pack_mode
+        indices = np.arange(phases)[:, None] + tap_offsets[None, :]
+        np.minimum(indices, interp_win.size - 1, out=indices)
+        packed = np.empty((2, phases, phase_taps), dtype=np.float64)
+        packed[0] = interp_win[indices]
+        packed[1] = interp_delta[indices]
+        prepared_win = packed[0]
+        prepared_delta = packed[1]
+        phase_taps = -phase_taps
+    if builtin:
+        _PREPARED_FILTERS[key] = (
+            weakref.ref(interp_win),
+            prepared_win,
+            prepared_delta,
+            phase_taps,
+        )
+    return prepared_win, prepared_delta, phase_taps
 
 
 def _apply(
@@ -78,30 +132,22 @@ def _apply(
         raise ValueError("filter coefficients must be a one-dimensional array of length >= 2")
     if not np.isfinite(interp_win).all():
         raise ValueError("filter coefficients must be finite")
-    interp_delta = np.empty_like(interp_win)
-    np.subtract(interp_win[1:], interp_win[:-1], out=interp_delta[:-1])
-    interp_delta[-1] = 0.0
     n_series = work.size // n_input
-    phase_taps = 0
+    pack_mode = 0
     if (
         real_dtype == np.float64
-        and scale == 1.0
         and n_series * n_output >= 1024
         and precision > 0
-        and (n_window - 1) % precision == 0
     ):
-        phase_taps = (n_window - 1) // precision
-        packed_coefficients = np.empty(
-            (2, precision, phase_taps), dtype=np.float64
-        )
-        packed_coefficients[0] = interp_win[:-1].reshape(
-            phase_taps, precision
-        ).T
-        packed_coefficients[1] = interp_delta[:-1].reshape(
-            phase_taps, precision
-        ).T
-        interp_win = packed_coefficients[0]
-        interp_delta = packed_coefficients[1]
+        if scale == 1.0 and (n_window - 1) % precision == 0:
+            pack_mode = -precision
+        elif scale < 1.0 and n_series * n_output >= _lib.PARALLEL_THRESHOLD:
+            index_step = max(1, int(scale * precision))
+            if index_step < n_window:
+                pack_mode = index_step
+    interp_win, interp_delta, phase_taps = _prepare_filter(
+        interp_win, precision, pack_mode
+    )
 
     if integer_input:
         fn = _lib.lib().mrs_resample_f64_to_f32
@@ -109,7 +155,7 @@ def _apply(
         fn = _lib.lib().mrs_resample_f32
     else:
         fn = _lib.lib().mrs_resample_f64
-    fn(
+    args = (
         _lib.addr(real_input),
         _lib.addr(times),
         _lib.addr(interp_win),
@@ -125,8 +171,31 @@ def _apply(
         float(window_scale),
         phase_taps,
         components,
-        int(parallel),
+        0,
     )
+    if (
+        parallel
+        and real_dtype == np.float64
+        and not integer_input
+        and n_series * n_output >= _lib.PARALLEL_THRESHOLD
+        and _lib.PARALLEL_WORKERS > 1
+    ):
+        workers = min(_lib.PARALLEL_WORKERS, n_output)
+        chunk = (n_output + workers - 1) // workers
+        range_fn = _lib.lib().mrs_resample_f64_range
+        futures = [
+            _lib.parallel_executor().submit(
+                range_fn,
+                *args[:-1],
+                start,
+                min(start + chunk, n_output),
+            )
+            for start in range(0, n_output, chunk)
+        ]
+        for future in futures:
+            future.result()
+    else:
+        fn(*args)
 
     result = np.moveaxis(result_moved, -1, axis)
     if axis == x.ndim - 1 and not (x.flags.f_contiguous and not x.flags.c_contiguous):

@@ -277,7 +277,7 @@ def test_packed_simd_tail_matches_upstream():
     assert_parity(actual, expected)
 
 
-@pytest.mark.parametrize("n_output", [32767, 32768])
+@pytest.mark.parametrize("n_output", [32767, 32768, 32771])
 def test_parallel_threshold_matches_serial(n_output):
     def short_filter():
         precision = 4
@@ -292,6 +292,22 @@ def test_parallel_threshold_matches_serial(n_output):
         x, 1.0, times, filter=short_filter, parallel=True
     )
     np.testing.assert_array_equal(sequential, threaded)
+
+
+def test_downsample_packed_simd_tail_matches_upstream():
+    def seventeen_tap_filter():
+        precision = 16
+        size = 17 * precision + 1
+        return np.linspace(1.0, 0.0, size), precision, 1.0
+
+    x = RNG.normal(size=50000)
+    actual = mrs.resample(
+        x, 50000, 32771, filter=seventeen_tap_filter, parallel=True
+    )
+    expected = resampy.resample(
+        x, 50000, 32771, filter=seventeen_tap_filter, parallel=False
+    )
+    assert_parity(actual, expected)
 
 
 def test_passband_tone_quality():
