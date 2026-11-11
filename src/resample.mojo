@@ -17,8 +17,8 @@ def load_weights[W: Int](
     eta: Float64,
 ) -> SIMD[DType.float64, W]:
     return (
-        window.load[width=W](offset)
-        + eta * delta.load[width=W](offset)
+        window.unsafe_load[width=W](offset)
+        + eta * delta.unsafe_load[width=W](offset)
     )
 
 
@@ -142,7 +142,7 @@ def resample_f64_range(
                         window, delta, wi, right_eta
                     )
                     if components == 1:
-                        acc_vec += weights * x.load[width=W](xi)
+                        acc_vec += weights * x.unsafe_load[width=W](xi)
                     else:
                         acc_vec += (
                             weights
@@ -157,7 +157,7 @@ def resample_f64_range(
                         window, delta, wi, right_eta
                     )
                     if components == 1:
-                        acc_vec_2 += weights * x.load[width=W](xi)
+                        acc_vec_2 += weights * x.unsafe_load[width=W](xi)
                     else:
                         acc_vec_2 += (
                             weights
@@ -173,7 +173,7 @@ def resample_f64_range(
                         window, delta, wi, right_eta
                     )
                     if components == 1:
-                        acc_vec += weights * x.load[width=W](xi)
+                        acc_vec += weights * x.unsafe_load[width=W](xi)
                     else:
                         acc_vec += (
                             weights
